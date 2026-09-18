@@ -12,6 +12,7 @@ import CueList from './components/CueList';
 import ImportModal from './components/ImportModal';
 import LayoutPreview from './components/LayoutPreview';
 import SyncPanel from './components/SyncPanel';
+import MergePanel from './components/MergePanel';
 
 export default function App() {
   const initial = useMemo(() => parseVTT(SAMPLE_VTT), []);
@@ -94,6 +95,14 @@ export default function App() {
     setSelectedId(c[0]?.id ?? null);
   }
 
+  function applyMerge(entries: { primaryId: string; mergedText: string }[], paired: number) {
+    // 确认后仅把配对副轨文本作为新一行追加到主轨；时间、标识符、设置、锁定状态原样保留
+    const byId = new Map(entries.map((e) => [e.primaryId, e.mergedText]));
+    setCues((cs) => cs.map((c) => (byId.has(c.id) ? { ...c, text: byId.get(c.id)! } : c)));
+    setConflict(null);
+    setToast(`双语合并完成：已为 ${paired} 个主轨片段追加副轨文本，未配对内容未写入。`);
+  }
+
   function exportVTT() {
     if (cues.length === 0) {
       setToast('没有可导出的片段。');
@@ -123,7 +132,7 @@ export default function App() {
           <span className="logo">🎞️</span>
           <div>
             <h1>WebVTT 字幕时序修复器</h1>
-            <span className="muted small">本地运行 · 拖动传播 · 锁定保护 · 布局预览 · 两点同步</span>
+            <span className="muted small">本地运行 · 拖动传播 · 锁定保护 · 布局预览 · 两点同步 · 双语合并</span>
           </div>
         </div>
         <div className="header-actions">
@@ -191,6 +200,14 @@ export default function App() {
               setSyncGhosts([]);
               setToast(`两点同步完成：已校准 ${affected} 个片段。`);
             }}
+            onJump={(id) => {
+              setSelectedId(id);
+              scrollToRef.current(id);
+            }}
+          />
+          <MergePanel
+            cues={sortedCues}
+            onApply={applyMerge}
             onJump={(id) => {
               setSelectedId(id);
               scrollToRef.current(id);

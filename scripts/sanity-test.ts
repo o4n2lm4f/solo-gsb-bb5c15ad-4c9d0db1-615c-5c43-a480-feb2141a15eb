@@ -3,6 +3,7 @@ import { parseTimecode, formatTimecode } from '../src/lib/time';
 import { parseVTT, serializeVTT } from '../src/lib/vtt';
 import { applyDrag } from '../src/lib/solver';
 import { planTwoPointSync } from '../src/lib/sync';
+import { planMerge, joinBilingualText } from '../src/lib/merge';
 import { detectIssues } from '../src/lib/issues';
 import {
   parseCueSettings,
@@ -433,6 +434,130 @@ const GAP = 0.1, MIN = 1;
   assert.strictEqual(r.identity, true);
   assert.deepStrictEqual(r.affectedIds.sort(), ['a', 'b']);
   ok('两点同步：恒等映射可识别');
+}
+
+// ---------- 合并双语轨 ----------
+
+interface MCue { s: number; e: number; text?: string }
+function mkm(spec: MCue[]): Cue[] {
+  return spec.map((c, i) => ({
+    id: `m${i}`, identifier: '', start: c.s, end: c.e,
+    text: c.text ?? `M${i}`, settings: '', locked: false,
+  }));
+}
+function mks(spec: MCue[]): Cue[] {
+  return spec.map((c, i) => ({
+    id: `s${i}`, identifier: '', start: c.s, end: c.e,
+    text: c.text ?? `S${i}`, settings: '', locked: false,
+  }));
+}
+
+// 27. 基本配对：完全重叠的片段一一配对，总交集为时长之和
+{
+  const plan = planMerge(mkm([{ s: 0, e: 4 }, { s: 5, e: 9 }]), mks([{ s: 0, e: 4 }, { s: 5, e: 9 }]));
+  assert.strictEqual(plan.candidates.length, 2);
+  assert.strictEqual(plan.pairs.length, 2);
+  assert.deepStrictEqual(plan.pairs.map((p) => [p.primaryIndex, p.secondaryIndex]), [[0, 0], [1, 1]]);
+  assert.ok(Math.abs(plan.totalOverlap - 8) < 1e-9);
+  assert.deepStrictEqual(plan.unmatchedPrimary, []);
+  assert.deepStrictEqual(plan.unmatchedSecondary, []);
+  ok('双语合并：完全重叠片段一一配对');
+}
+
+// 28. 候选阈值：交集 / 较短片段时长 < 50% 排除；恰为 50% 保留
+{
+  // 主 [0,3] 时长3，副 [2,10] 时长8，交集 1s，较短3s => 33% 排除
+  const plan1 = planMerge(mkm([{ s: 0, e: 3 }]), mks([{ s: 2, e: 10 }]));
+  assert.strictEqual(plan1.candidates.length, 0);
+  assert.strictEqual(plan1.pairs.length, 0);
+  assert.deepStrictEqual(plan1.unmatchedPrimary, [0]);
+  assert.deepStrictEqual(plan1.unmatchedSecondary, [0]);
+
+  // 主 [0,4]，副 [2,10]，交集 2s，较短4s => 恰好 50% 保留
+  const plan2 = planMerge(mkm([{ s: 0, e: 4 }]), mks([{ s: 2, e: 10 }]));
+  assert.strictEqual(plan2.candidates.length, 1);
+  assert.strictEqual(plan2.pairs.length, 1);
+  assert.ok(Math.abs(plan2.pairs[0].overlap - 2) < 1e-9);
+
+  // 仅端点接触（交集 0）不算候选
+  const plan3 = planMerge(mkm([{ s: 0, e: 4 }]), mks([{ s: 4, e: 8 }]));
+  assert.strictEqual(plan3.candidates.length, 0);
+  ok('双语合并：50% 阈值（边界含）与零交集排除');
+}
+
+// 29. 每条最多使用一次、保持顺序、总交集最大
+{
+  // 长副轨 s0[0,8] 与两条主轨各相交，但只能使用一次；取权重更大的一对
+  const plan = planMerge(mkm([{ s: 0, e: 4 }, { s: 4.1, e: 8 }]), mks([{ s: 0, e: 8 }]));
+  assert.strictEqual(plan.pairs.length, 1);
+  assert.strictEqual(plan.pairs[0].primaryIndex, 0);
+  assert.strictEqual(plan.pairs[0].secondaryIndex, 0);
+  assert.ok(Math.abs(plan.pairs[0].overlap - 4) < 1e-9);
+  assert.deepStrictEqual(plan.unmatchedPrimary, [1]);
+
+  // 交叉配对比顺序配对差时，DP 取保持双方顺序的方案：
+  // 主 [0,4]/[6,10]，副 s0[0,4]/s1[6,10]，另一个夹在中间的主 [3,7]
+  // 与两条副轨各只相交 1s（25%），不成候选；最优仍是两端同序两对
+  const plan2 = planMerge(
+    mkm([{ s: 0, e: 4 }, { s: 3, e: 7 }, { s: 6, e: 10 }]),
+    mks([{ s: 0, e: 4 }, { s: 6, e: 10 }]),
+  );
+  assert.strictEqual(plan2.pairs.length, 2);
+  assert.deepStrictEqual(plan2.pairs.map((p) => [p.primaryIndex, p.secondaryIndex]), [[0, 0], [2, 1]]);
+  assert.deepStrictEqual(plan2.unmatchedPrimary, [1]);
+  ok('双语合并：每条最多一次、保持顺序、总交集最大');
+}
+
+// 30. 总分并列时取副轨索引序列字典序更小方案
+{
+  // 两条完全相同的副轨 s1/s2 都与主 p1 完全重叠（各 4s），取副轨索引更小者
+  const plan = planMerge(
+    mkm([{ s: 0, e: 4 }, { s: 4.1, e: 8 }]),
+    mks([{ s: 0, e: 4 }, { s: 4.1, e: 8 }, { s: 4.1, e: 8 }]),
+  );
+  // 最优：(p0,s0)=4 + (p1,s1)=4，序列 [0,1]；而不是 [0,2]
+  assert.strictEqual(plan.pairs.length, 2);
+  assert.deepStrictEqual(plan.pairs.map((p) => p.secondaryIndex), [0, 1]);
+  assert.deepStrictEqual(plan.unmatchedSecondary, [2]);
+
+  // 单条主轨同时与两条相同副轨等权：取副轨 #1
+  const plan2 = planMerge(mkm([{ s: 0, e: 4 }]), mks([{ s: 0, e: 4 }, { s: 0, e: 4 }]));
+  assert.strictEqual(plan2.pairs.length, 1);
+  assert.strictEqual(plan2.pairs[0].secondaryIndex, 0);
+  assert.deepStrictEqual(plan2.unmatchedSecondary, [1]);
+  ok('双语合并：并列时副轨索引序列字典序更小');
+}
+
+// 31. 输入不被修改；确认语义：副轨文本作为新一行追加，主轨字段原样保留
+{
+  const main = mkm([{ s: 0, e: 4, text: '你好' }]);
+  main[0].identifier = 'cid-1';
+  main[0].settings = 'line:90% align:middle';
+  main[0].locked = true;
+  const sub = mks([{ s: 0, e: 4, text: 'Hello' }]);
+  const snapshot = JSON.parse(JSON.stringify([main, sub]));
+  const plan = planMerge(main, sub);
+  assert.deepStrictEqual([main, sub], snapshot);
+  assert.strictEqual(joinBilingualText(main[0].text, sub[0].text), '你好\nHello');
+  // 多行文本各自去尾空白后拼接
+  assert.strictEqual(joinBilingualText('A\n', 'B\n\n'), 'A\nB');
+
+  // 模拟确认写入：只改 text，start/end/identifier/settings/locked 原样保留
+  const pair = plan.pairs[0];
+  const applied = main.map((c) =>
+    c.id === plan.primary[pair.primaryIndex].id
+      ? { ...c, text: joinBilingualText(c.text, plan.secondary[pair.secondaryIndex].text) }
+      : c,
+  );
+  assert.strictEqual(applied[0].text, '你好\nHello');
+  assert.strictEqual(applied[0].start, 0);
+  assert.strictEqual(applied[0].end, 4);
+  assert.strictEqual(applied[0].identifier, 'cid-1');
+  assert.strictEqual(applied[0].settings, 'line:90% align:middle');
+  assert.strictEqual(applied[0].locked, true);
+  // 未配对副轨不出现在写入结果中（无任何主轨文本包含它）
+  assert.ok(!applied.some((c) => c.text.includes('未写入')));
+  ok('双语合并：输入不变；确认仅追加文本行，时间/标识符/设置/锁定保留');
 }
 
 console.log(`\n全部 ${passed} 组测试通过 ✅`);
