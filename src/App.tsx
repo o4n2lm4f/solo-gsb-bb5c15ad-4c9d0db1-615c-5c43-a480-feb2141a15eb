@@ -12,6 +12,7 @@ import CueList from './components/CueList';
 import ImportModal from './components/ImportModal';
 import LayoutPreview from './components/LayoutPreview';
 import SyncPanel from './components/SyncPanel';
+import MergePanel from './components/MergePanel';
 
 export default function App() {
   const initial = useMemo(() => parseVTT(SAMPLE_VTT), []);
@@ -123,7 +124,7 @@ export default function App() {
           <span className="logo">🎞️</span>
           <div>
             <h1>WebVTT 字幕时序修复器</h1>
-            <span className="muted small">本地运行 · 拖动传播 · 锁定保护 · 布局预览 · 两点同步</span>
+            <span className="muted small">本地运行 · 拖动传播 · 锁定保护 · 两点同步 · 双语合并 · 布局预览</span>
           </div>
         </div>
         <div className="header-actions">
@@ -194,6 +195,22 @@ export default function App() {
             onJump={(id) => {
               setSelectedId(id);
               scrollToRef.current(id);
+            }}
+          />
+          <MergePanel
+            cues={sortedCues}
+            onJump={(id) => {
+              setSelectedId(id);
+              scrollToRef.current(id);
+            }}
+            onApply={(next, paired, unmatched) => {
+              setCues(next);
+              setConflict(null);
+              setToast(
+                unmatched > 0
+                  ? `双语合并完成：${paired} 条主轨追加副轨文本，${unmatched} 条副轨未配对未写入。`
+                  : `双语合并完成：${paired} 条主轨追加副轨文本。`,
+              );
             }}
           />
           <LayoutPreview cue={selected} />
